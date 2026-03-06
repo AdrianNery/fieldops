@@ -12,25 +12,29 @@ export function AuthProvider({ children }) {
   async function createProfileIfNeeded(user) {
     if (!user) return
     
-    // Check if profile exists
-    const { data: existing } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('id', user.id)
-      .single()
-    
-    if (!existing) {
-      // Create profile
-      await supabase.from('profiles').insert({
-        id: user.id,
-        email: user.email,
-        full_name: user.user_metadata?.full_name || user.email.split('@')[0],
-        role: 'crew'
-      })
+    try {
+      // Check if profile exists
+      const { data: existing } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('id', user.id)
+        .single()
+      
+      if (!existing) {
+        // Create profile with try-catch to handle trigger issues
+        await supabase.from('profiles').upsert({
+          id: user.id,
+          email: user.email,
+          full_name: user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
+          role: 'crew'
+        }, { onConflict: 'id', ignoreDuplicates: true })
+      }
+    } catch (e) {
+      console.log('Profile creation handled:', e.message)
     }
   }
 
-  async function fetchProfile(userId) {
+  async function fetchProfile(userId, userEmail) {
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
@@ -39,16 +43,26 @@ export function AuthProvider({ children }) {
     
     if (!error && data) {
       setProfile(data)
-    } else if (error?.code === 'PGRST116') {
-      // Profile doesn't exist, create it
-      await createProfileIfNeeded({ id: userId, email: profile?.email })
-      // Fetch again
-      const { data: newData } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .single()
-      if (newData) setProfile(newData)
+    } else {
+      // Profile doesn't exist or error - create it
+      try {
+        await supabase.from('profiles').upsert({
+          id: userId,
+          email: userEmail || '',
+          full_name: 'New User',
+          role: 'crew'
+        }, { onConflict: 'id', ignoreDuplicates: true })
+        
+        // Fetch again
+        const { data: newData } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .single()
+        if (newData) setProfile(newData)
+      } catch (e) {
+        console.log('Profile fetch/creation handled')
+      }
     }
   }
 
@@ -56,7 +70,7 @@ export function AuthProvider({ children }) {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null)
       if (session?.user) {
-        createProfileIfNeeded(session.user).then(() => fetchProfile(session.user.id))
+        createProfileIfNeeded(session.user).then(() => fetchProfile(session.user.id, session.user.email))
       }
       setLoading(false)
     })
@@ -64,7 +78,7 @@ export function AuthProvider({ children }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
       if (session?.user) {
-        createProfileIfNeeded(session.user).then(() => fetchProfile(session.user.id))
+        createProfileIfNeeded(session.user).then(() => fetchProfile(session.user.id, session.user.email))
       } else {
         setProfile(null)
       }
