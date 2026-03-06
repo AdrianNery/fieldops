@@ -26,6 +26,7 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
   const [pedestalTypes, setPedestalTypes] = useState([])
   const [pipeSizes, setPipeSizes] = useState([])
   const [saving, setSaving] = useState(false)
+  const [showPropertyLines, setShowPropertyLines] = useState(true)
   
   // Tool modes: 'select', 'handhole', 'pedestal', 'bore'
   const [toolMode, setToolMode] = useState('select')
@@ -36,6 +37,17 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     supabase.from('pedestal_types').select('*').order('name').then(({ data }) => setPedestalTypes(data || []))
     supabase.from('bore_pipe_sizes').select('*').order('name').then(({ data }) => setPipeSizes(data || []))
   }, [])
+
+  // Handle tool mode changes from outside (from toolbar)
+  useEffect(() => {
+    if (!map.current || !mapReady) return
+    
+    if (toolMode === 'handhole' || toolMode === 'pedestal') {
+      map.current.getCanvas().style.cursor = 'crosshair'
+    } else {
+      map.current.getCanvas().style.cursor = ''
+    }
+  }, [toolMode, mapReady])
 
   // Init map
   useEffect(() => {
@@ -51,7 +63,7 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     map.current.addControl(new mapboxgl.NavigationControl({ showCompass: true }), 'top-right')
     map.current.addControl(new mapboxgl.ScaleControl(), 'bottom-left')
 
-    // Only add draw for bore paths
+    // Add draw control for bore paths
     if (isAdmin) {
       draw.current = new MapboxDraw({
         displayControlsDefault: false,
@@ -61,25 +73,52 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     }
 
     map.current.on('load', () => {
+      // Enable property lines (cadastral data) - built into satellite-streets style
+      // Show parcel boundaries at certain zoom levels
+      if (map.current.getLayer('cadastral-parcels')) {
+        map.current.setLayoutProperty('cadastral-parcels', 'visibility', showPropertyLines ? 'visible' : 'none')
+      }
+      
+      // Add property lines layer manually if not available
+      if (!map.current.getLayer('property-lines')) {
+        map.current.addLayer({
+          id: 'property-lines',
+          type: 'line',
+          source: 'composite',
+          'source-layer': 'cadastral-parcels',
+          paint: {
+            'line-color': '#FFFF00',
+            'line-width': 1.5,
+            'line-opacity': 0.7
+          },
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round'
+          },
+          minzoom: 14,
+          maxzoom: 22
+        }, 'road-label') // Add below road labels
+      }
+      
       initSources()
       loadAllItems()
       setMapReady(true)
     })
 
-    // Draw event for bore paths
-    if (isAdmin) {
-      map.current.on('draw.create', ({ features }) => {
-        const f = features[0]
-        if (f.geometry.type === 'LineString') {
-          setSaveModal({ featureType: 'line', feature: f })
-          setSaveForm({ pipe_size_id: '', num_pipes: 1, label: '' })
-        }
-      })
-    }
-
-    // Click handler for placing handholes/pedestals directly
-    if (isAdmin) {
+    // Set up click handler after map loads
+    map.current.on('load', () => {
+      // Click handler for placing handholes/pedestals
       map.current.on('click', (e) => {
+        if (!isAdmin) return
+        
+        // Check if clicking on existing feature first
+        const features = map.current.queryRenderedFeatures(e.point, {
+          layers: ['layer-handholes', 'layer-pedestals', 'layer-bore-paths']
+        })
+        
+        if (features.length > 0) return // Clicked on existing item
+        
+        // Otherwise, place new item if in placement mode
         if (toolMode === 'handhole') {
           const feature = {
             type: 'Feature',
@@ -96,11 +135,21 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
           setSaveForm({ kind: 'pedestal', type_id: '', label: '' })
         }
       })
-    }
+      
+      // Draw event for bore paths
+      map.current.on('draw.create', ({ features }) => {
+        const f = features[0]
+        if (f.geometry.type === 'LineString') {
+          setSaveModal({ featureType: 'line', feature: f })
+          setSaveForm({ pipe_size_id: '', num_pipes: 1, label: '' })
+        }
+      })
+    })
 
-    // Click handlers for existing items
+    // Click handlers for existing items (outside load to ensure they're set up)
     map.current.on('click', 'layer-handholes', e => {
       e.preventDefault()
+      e.stopPropagation()
       const props = e.features[0].properties
       onItemSelect('handhole', {
         id: props.id, label: props.label, status: props.status,
@@ -109,6 +158,7 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     })
     map.current.on('click', 'layer-pedestals', e => {
       e.preventDefault()
+      e.stopPropagation()
       const props = e.features[0].properties
       onItemSelect('pedestal', {
         id: props.id, label: props.label, status: props.status,
@@ -117,6 +167,7 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     })
     map.current.on('click', 'layer-bore-paths', e => {
       e.preventDefault()
+      e.stopPropagation()
       const props = e.features[0].properties
       onItemSelect('bore_path', {
         id: props.id, label: props.label, status: props.status,
@@ -124,23 +175,15 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
       })
     })
 
-    // Cursor changes
-    const layers = ['layer-handholes', 'layer-pedestals', 'layer-bore-paths']
-    layers.forEach(l => {
-      map.current.on('mouseenter', l, () => { map.current.getCanvas().style.cursor = 'pointer' })
-      map.current.on('mouseleave', l, () => { map.current.getCanvas().style.cursor = '' })
-    })
-
-    // Cursor for placement mode
-    map.current.on('mouseenter', () => {
-      if (isAdmin && (toolMode === 'handhole' || toolMode === 'pedestal')) {
-        map.current.getCanvas().style.cursor = 'crosshair'
-      }
-    })
-    map.current.on('mouseleave', () => {
-      if (!['layer-handholes', 'layer-pedestals', 'layer-bore-paths'].some(l => map.current.getCanvas().style.cursor === 'pointer')) {
-        map.current.getCanvas().style.cursor = ''
-      }
+    // Cursor changes for existing items
+    const itemLayers = ['layer-handholes', 'layer-pedestals', 'layer-bore-paths']
+    itemLayers.forEach(l => {
+      map.current.on('mouseenter', l, () => { 
+        if (toolMode === 'select') map.current.getCanvas().style.cursor = 'pointer' 
+      })
+      map.current.on('mouseleave', l, () => { 
+        if (toolMode === 'select') map.current.getCanvas().style.cursor = '' 
+      })
     })
 
     return () => {
@@ -150,20 +193,22 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     }
   }, [])
 
-  // Update cursor when tool mode changes
+  // Toggle property lines
   useEffect(() => {
-    if (map.current && mapReady && isAdmin) {
-      if (toolMode === 'handhole' || toolMode === 'pedestal') {
-        map.current.getCanvas().style.cursor = 'crosshair'
-      } else {
-        map.current.getCanvas().style.cursor = ''
-      }
+    if (!mapReady || !map.current) return
+    if (map.current.getLayer('property-lines')) {
+      map.current.setLayoutProperty(
+        'property-lines', 
+        'visibility', 
+        showPropertyLines ? 'visible' : 'none'
+      )
     }
-  }, [toolMode, mapReady, isAdmin])
+  }, [showPropertyLines, mapReady])
 
   function initSources() {
     const empty = { type: 'FeatureCollection', features: [] }
 
+    // Handholes
     map.current.addSource('src-handholes', { type: 'geojson', data: empty })
     map.current.addLayer({
       id: 'layer-handholes',
@@ -174,7 +219,6 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
         'circle-color': ['match', ['get', 'status'], 'not_started', STATUS_COLORS.not_started, 'in_progress', STATUS_COLORS.in_progress, 'needs_attention', STATUS_COLORS.needs_attention, 'complete', STATUS_COLORS.complete, STATUS_COLORS.not_started],
         'circle-stroke-color': '#ffffff',
         'circle-stroke-width': 2,
-        'circle-opacity': 0.9,
       }
     })
     map.current.addLayer({
@@ -182,10 +226,11 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
       type: 'symbol',
       source: 'src-handholes',
       minzoom: 16,
-      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 1.5], 'text-anchor': 'top' },
+      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 1.5] },
       paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1 }
     })
 
+    // Pedestals
     map.current.addSource('src-pedestals', { type: 'geojson', data: empty })
     map.current.addLayer({
       id: 'layer-pedestals',
@@ -196,7 +241,6 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
         'circle-color': ['match', ['get', 'status'], 'not_started', STATUS_COLORS.not_started, 'in_progress', STATUS_COLORS.in_progress, 'needs_attention', STATUS_COLORS.needs_attention, 'complete', STATUS_COLORS.complete, STATUS_COLORS.not_started],
         'circle-stroke-color': '#ffffff',
         'circle-stroke-width': 2,
-        'circle-opacity': 0.9,
       }
     })
     map.current.addLayer({
@@ -204,10 +248,11 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
       type: 'symbol',
       source: 'src-pedestals',
       minzoom: 16,
-      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 1.5], 'text-anchor': 'top' },
+      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 1.5] },
       paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1 }
     })
 
+    // Bore paths
     map.current.addSource('src-bore-paths', { type: 'geojson', data: empty })
     map.current.addLayer({
       id: 'layer-bore-paths-casing',
@@ -255,7 +300,6 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     try {
       if (saveModal.featureType === 'point') {
         const table = saveForm.kind === 'handhole' ? 'handholes' : 'pedestals'
-        const typeTable = saveForm.kind === 'handhole' ? 'handhole_types' : 'pedestal_types'
         
         await supabase.from(table).insert({
           project_id: project.id,
@@ -281,6 +325,7 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
       draw.current?.deleteAll()
       setSaveModal(null)
       setSaveForm({})
+      setToolMode('select')
       loadAllItems()
     } catch (err) {
       alert('Error saving: ' + err.message)
@@ -291,7 +336,7 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
   const toolBtn = (mode, icon, label) => (
     <button
       onClick={() => setToolMode(mode)}
-      className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all ${
+      className={`flex items-center gap-2 px-3 py-2 rounded-lg font-medium text-sm transition-all ${
         toolMode === mode 
           ? 'bg-orange-500 text-white shadow-lg' 
           : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
@@ -306,21 +351,35 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
     <div className="relative w-full h-full">
       {/* Toolbar for admins */}
       {isAdmin && (
-        <div className="absolute top-4 left-4 z-10 flex gap-2 bg-gray-900/90 backdrop-blur p-2 rounded-xl shadow-xl border border-gray-700">
-          {toolBtn('select', '👆', 'Select')}
-          {toolBtn('handhole', '⬡', 'Handhole')}
-          {toolBtn('pedestal', '◆', 'Pedestal')}
-          <div className="w-px bg-gray-600 mx-1" />
-          {toolBtn('bore', '📏', 'Draw Bore')}
+        <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 bg-gray-900/95 backdrop-blur p-2 rounded-xl shadow-xl border border-gray-700">
+          <div className="flex gap-2">
+            {toolBtn('select', '👆', 'Select')}
+            {toolBtn('handhole', '⬡', 'Handhole')}
+            {toolBtn('pedestal', '◆', 'Pedestal')}
+          </div>
+          <div className="flex gap-2">
+            {toolBtn('bore', '📏', 'Draw Bore')}
+          </div>
+          <div className="border-t border-gray-600 pt-2 mt-1">
+            <label className="flex items-center gap-2 cursor-pointer px-2">
+              <input 
+                type="checkbox" 
+                checked={showPropertyLines} 
+                onChange={(e) => setShowPropertyLines(e.target.checked)}
+                className="w-4 h-4 accent-orange-500"
+              />
+              <span className="text-xs text-gray-300">Property Lines</span>
+            </label>
+          </div>
         </div>
       )}
 
       {/* Help text */}
       {isAdmin && toolMode !== 'select' && (
-        <div className="absolute top-20 left-4 z-10 bg-blue-900/90 backdrop-blur px-4 py-2 rounded-lg text-sm text-white max-w-xs">
-          {toolMode === 'handhole' && 'Click on the map to place a handhole'}
-          {toolMode === 'pedestal' && 'Click on the map to place a pedestal'}
-          {toolMode === 'bore' && 'Use the draw tool to draw a bore path line'}
+        <div className="absolute top-40 left-4 z-10 bg-blue-900/90 backdrop-blur px-4 py-2 rounded-lg text-sm text-white max-w-xs">
+          {toolMode === 'handhole' && '🖱️ Click on the map to place a handhole'}
+          {toolMode === 'pedestal' && '🖱️ Click on the map to place a pedestal'}
+          {toolMode === 'bore' && '📏 Use the draw tool to draw a bore path line'}
         </div>
       )}
 
@@ -365,9 +424,6 @@ export default function MapView({ project, isAdmin, onItemSelect, layers }) {
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
                 </select>
-                {(saveForm.kind === 'handhole' ? handholeTypes : pedestalTypes).length === 0 && (
-                  <p className="text-xs text-yellow-500 mt-1">⚠️ No types. Add in Admin Settings.</p>
-                )}
               </div>
             )}
 
