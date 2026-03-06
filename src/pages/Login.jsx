@@ -1,26 +1,45 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAuth } from '../context/AuthContext'
+import { supabase } from '../lib/supabase'
 
 export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const { signIn } = useAuth()
+  const [isSignUp, setIsSignUp] = useState(false)
+  const [success, setSuccess] = useState('')
   const navigate = useNavigate()
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
+    setSuccess('')
     setLoading(true)
-    const { error } = await signIn(email, password)
-    if (error) {
-      setError(error.message)
-      setLoading(false)
+
+    if (isSignUp) {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: window.location.origin }
+      })
+      if (error) {
+        setError(error.message)
+      } else {
+        setSuccess('Check your email to confirm your account!')
+      }
     } else {
-      navigate('/')
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      })
+      if (error) {
+        setError(error.message)
+      } else {
+        navigate('/')
+      }
     }
+    setLoading(false)
   }
 
   return (
@@ -36,6 +55,11 @@ export default function Login() {
           {error && (
             <div className="bg-red-900/40 border border-red-500/50 text-red-300 px-4 py-3 rounded-xl text-sm">
               {error}
+            </div>
+          )}
+          {success && (
+            <div className="bg-green-900/40 border border-green-500/50 text-green-300 px-4 py-3 rounded-xl text-sm">
+              {success}
             </div>
           )}
           <div>
@@ -57,7 +81,7 @@ export default function Login() {
               value={password}
               onChange={e => setPassword(e.target.value)}
               required
-              autoComplete="current-password"
+              autoComplete={isSignUp ? "new-password" : "current-password"}
               className="w-full bg-gray-700 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition"
               placeholder="••••••••"
             />
@@ -67,8 +91,18 @@ export default function Login() {
             disabled={loading}
             className="w-full bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-xl transition-colors text-base"
           >
-            {loading ? 'Signing in...' : 'Sign In'}
+            {loading ? (isSignUp ? 'Creating account...' : 'Signing in...') : (isSignUp ? 'Sign Up' : 'Sign In')}
           </button>
+
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={() => { setIsSignUp(!isSignUp); setError(''); setSuccess('') }}
+              className="text-orange-400 hover:text-orange-300 text-sm underline"
+            >
+              {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
+            </button>
+          </div>
         </form>
       </div>
     </div>
